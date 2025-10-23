@@ -207,8 +207,15 @@ async def finalize_split(update, context: ContextTypes.DEFAULT_TYPE):
     participants = context.user_data["participants"]
 
     subtotal = sum(item["total_price"] for item in parsed["items"])
-    tax_amount = sum(t["amount"] for t in parsed.get("taxes", [])) if parsed.get("taxes") else 0
-    tax_rate = tax_amount / subtotal if subtotal else 0
+    tax_amount = sum(t.get("amount", 0) for t in parsed.get("taxes", []))
+    service_amount = 0
+    if parsed.get("service_charge"):
+        service_amount = parsed["service_charge"].get("amount") or 0
+    subtotal = subtotal or 1  # avoid division by zero
+
+    # Compute proportional rates
+    tax_rate = tax_amount / subtotal
+    service_rate = service_amount / subtotal
 
     per_person = {p: 0 for p in participants}
     for item in parsed["items"]:
@@ -218,8 +225,10 @@ async def finalize_split(update, context: ContextTypes.DEFAULT_TYPE):
         for person in item["assigned_to"]:
             per_person[person] += cost_share
 
+    # Apply proportional tax and service to each person's subtotal
     for p in per_person:
-        per_person[p] += per_person[p] * tax_rate
+        per_person[p] *= (1 + tax_rate + service_rate)
+
 
     msg = "💰 *Final Split:*\n"
     for p, amt in per_person.items():

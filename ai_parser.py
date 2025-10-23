@@ -33,7 +33,10 @@ matching the structure below. You MUST extract each menu item and its price corr
   {{"name": "AGLIO OLIO", "qty": 2, "unit_price": 32.245, "total_price": 64.49}}
 - If multiple quantities of an item exist, you must still record the quantity count.
 - Convert currency symbols ($, RM, etc.) into floats.
-- Use "Tax" or "Service" to fill `taxes` or `service_charge`.
+- Taxes and service charges may appear under labels like "TAX", "GST", "SST", "VAT", "SERVICE", or "SERVICE CHARGE".
+- If any line near the subtotal or total includes such labels, extract them as either `taxes` or `service_charge`.
+- If the service charge appears as a fixed amount, set `percent` to null and record the amount.
+
 
 ### OCR TEXT:
 {ocr}
@@ -63,6 +66,7 @@ def call_openrouter(prompt: str) -> str:
 
 
 def to_float(x):
+    """Safely convert a value to float, cleaning common receipt formats."""
     try:
         if x is None:
             return 0.0
@@ -94,12 +98,12 @@ def parse_receipt_text(ocr_text: str, participants: list = None) -> dict:
         else:
             parsed = {"items": [], "taxes": [], "service_charge": None, "discounts": [], "currency": None}
 
-    # === POSTPROCESS ITEMS ===
     cleaned_items = []
+
     for it in parsed.get("items", []):
         name = it.get("name", "").strip()
 
-        # Detect quantity in name if AI missed it
+        # Detect quantity if AI missed it
         qty = it.get("qty")
         if qty is None:
             m = re.match(r'^\s*(\d+)\s*[xX]?\s*(.*)', name)
@@ -114,10 +118,10 @@ def parse_receipt_text(ocr_text: str, participants: list = None) -> dict:
             qty = 1
         qty = max(1, qty)
 
-        total = to_float(it.get("total_price", None))
-        unit = to_float(it.get("unit_price", None))
+        total = to_float(it.get("total_price"))
+        unit = to_float(it.get("unit_price"))
 
-        # Derive missing values
+        # Fix missing price info
         if not unit and qty > 0 and total:
             unit = total / qty
         if not total and unit:
@@ -126,14 +130,43 @@ def parse_receipt_text(ocr_text: str, participants: list = None) -> dict:
         unit = round(unit or 0.0, 2)
         total = round(total or 0.0, 2)
 
-        # Expand into multiple items if qty > 1 (for selection purposes)
+        # Expand into multiple individual items (for Telegram selection)
         for _ in range(qty):
             cleaned_items.append({
                 "name": name,
                 "qty": 1,
                 "unit_price": unit,
-                "total_price": unit,
+                "total_price": unit,  # per-item price
             })
 
     parsed["items"] = cleaned_items
+
+    # --- Fix missing or mislabelled taxes ---
+    if not parsed.get("taxes"):
+        # Try to infer tax from OCR totals
+        m_tax = re.findall(r'(SST|GST|Tax|Service\s?Charge|Svc\s?Chg)[^\d]*(\d+\.\d{2})', ocr_text, re.I)
+        inferred = []
+        for label, val in m_tax:
+            inferred.append({"type": label.strip(), "amount": to_float(val)})
+        parsed["taxes"] = inferred
+
+    # Normalize service_charge
+    if parsed.get("service_charge") and isinstance(parsed["service_charge"], dict):
+        parsed["service_charge"]["amount"] = to_float(parsed["service_charge"].get("amount"))
+
+        # --- Normalize service/tax confusion ---
+    # Sometimes the model puts "SERVICE" into taxes instead of service_charge
+    if (not parsed.get("service_charge") or not parsed["service_charge"].get("amount")) and parsed.get("taxes"):
+        for t in parsed["taxes"]:
+            if "service" in t.get("type", "").lower() or "svc" in t.get("type", "").lower():
+                parsed["service_charge"] = {"percent": None, "amount": to_float(t["amount"])}
+                parsed["taxes"].remove(t)
+                break
+
+    # --- Compute combined total ---
+    subtotal = sum(it["total_price"] for it in parsed.get("items", []))
+    service_amt = to_float(parsed.get("service_charge", {}).get("amount", 0))
+    tax_amt = sum(to_float(t.get("amount")) for t in parsed.get("taxes", []))
+    parsed["computed_total"] = round(subtotal + service_amt + tax_amt, 2)
+
     return parsed
