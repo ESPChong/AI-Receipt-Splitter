@@ -26,3 +26,7 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.bak
+
+# Codes, Keys
+.env
+receipt-splitter-476008-b3a0f596ea5c
