@@ -79,7 +79,8 @@ python tg_bot.py
 
 ## Future Enhancements
 
-1. Export split results to PDF or CSV
-2. Support handwritten receipts
-3. Integrate with Google Sheets or Splitwise
-4. Detect multiple currencies automatically
+1. Improve bot UI for more accessibility and control
+2. Export split results to PDF or CSV
+3. Support handwritten receipts
+4. Integrate with Google Sheets or Splitwise
+5. Detect multiple currencies automatically

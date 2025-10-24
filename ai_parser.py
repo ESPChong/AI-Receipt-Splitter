@@ -308,18 +308,16 @@ def parse_receipt_text(ocr_text: str, participants: list = None) -> dict:
     for it in parsed["items"]:
         qty = int(it.get("qty", 1) or 1)
         line_total = to_float(it.get("total_price", 0))
-        per_unit = round((line_total / qty) if qty else 0.0, 2)
+        per_unit = (line_total / qty) if qty else 0.0  # keep full precision
         for _ in range(qty):
             expanded.append({
                 "name": it.get("name"),
                 "qty": 1,
                 "unit_price": per_unit,
                 "total_price": per_unit,
-                # carry line discount info optionally
-                # "line_discount": it.get("discount")
             })
+
     parsed["items_expanded"] = expanded
-    parsed["items"] = expanded  # main bot expects unit list
 
     # --- Infer taxes/service if model missed them ---
     if not parsed.get("taxes"):

@@ -7,7 +7,6 @@ from telegram.ext import (
 )
 from ocr import extract_text_from_image
 from ai_parser import parse_receipt_text
-from split_calc import compute_splits
 
 load_dotenv()
 TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -18,7 +17,6 @@ WAIT_RECEIPT, ASK_SPLIT_MODE, ASK_NAMES, CONFIRM_PEOPLE, ITEM_SELECTION = range(
 
 # --- Keyboards ---
 def main_menu_keyboard():
-    """Keyboard for welcome/start + restart button."""
     return ReplyKeyboardMarkup(
         [[KeyboardButton("🚀 Start Receipt Splitter"), KeyboardButton("🔄 Restart")]],
         resize_keyboard=True,
@@ -27,7 +25,6 @@ def main_menu_keyboard():
 
 
 def split_mode_keyboard():
-    """Keyboard for split mode selection + restart button."""
     return ReplyKeyboardMarkup(
         [[KeyboardButton("Even Split"), KeyboardButton("Each Pays Their Own"), KeyboardButton("🔄 Restart")]],
         resize_keyboard=True,
@@ -37,22 +34,18 @@ def split_mode_keyboard():
 
 # --- Handlers ---
 async def handle_receipt_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Merged welcome + ask receipt photo message."""
     await update.message.reply_text(
-        "👋 Welcome to the Receipt Splitter bot!\n"
-        "📸 Please send a clear photo of the receipt to start.",
+        "👋 Welcome to the Receipt Splitter bot!\n📸 Please send a clear photo of the receipt to start.",
         reply_markup=main_menu_keyboard()
     )
     return WAIT_RECEIPT
 
 
 async def handle_restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Reset the conversation and show the welcome message."""
     context.user_data.clear()
     context.chat_data.clear()
     await update.message.reply_text(
-        "👋 Welcome to the Receipt Splitter bot!\n"
-        "📸 Please send a clear photo of the receipt to start.",
+        "👋 Welcome to the Receipt Splitter bot!\n📸 Please send a clear photo of the receipt to start.",
         reply_markup=main_menu_keyboard()
     )
     return WAIT_RECEIPT
@@ -78,8 +71,7 @@ async def ask_names(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data["split_mode"] = "even" if "even" in text else "own"
     await update.message.reply_text(
-        "Please list the names of everyone who were present, separated by *spaces*.\n"
-        "(Example: Alice Bob Charlie)\n⚠️ Note: Don’t use the same name twice.",
+        "Please list the names of everyone present, separated by *spaces*.\n(Example: Alice Bob Charlie)\n⚠️ Don’t use the same name twice.",
         parse_mode="Markdown"
     )
     return ASK_NAMES
@@ -93,10 +85,10 @@ async def confirm_people(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["participants"] = names
     count = len(names)
 
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Yes", callback_data="yes"),
-         InlineKeyboardButton("❌ No", callback_data="no")]
-    ])
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Yes", callback_data="yes"),
+        InlineKeyboardButton("❌ No", callback_data="no")
+    ]])
     await update.message.reply_text(
         f"So there are *{count}* people present: {', '.join(names)}. Is that correct?",
         parse_mode="Markdown",
@@ -119,18 +111,30 @@ async def confirm_people_response(update: Update, context: ContextTypes.DEFAULT_
     participants = context.user_data["participants"]
     split_mode = context.user_data["split_mode"]
 
+    # --- OCR & Parsing ---
     ocr_text = extract_text_from_image(img_path)
     parsed = parse_receipt_text(ocr_text, participants)
-
     context.chat_data["parsed"] = parsed
     context.chat_data["assignments"] = {p: [] for p in participants}
 
+    # --- EVEN SPLIT MODE ---
     if split_mode == "even":
-        result = compute_splits(parsed, participants)
+        # Use total from receipt
+        total = parsed.get("total") or parsed.get("computed_total") or 0.0
+        if not total:
+            total = sum(item.get("total_price", 0) for item in parsed.get("items", []))
+            total += sum(t.get("amount", 0) for t in parsed.get("taxes", []))
+            total += parsed.get("service_charge", {}).get("amount") or 0
+            total -= sum(d.get("amount", 0) for d in parsed.get("discounts", []))
+
+        share = round(total / max(1, len(participants)), 2)
+        result = {p: share for p in participants}
+
         msg = "*Even Split:*\n" + "\n".join(f"{p}: ${amt:.2f}" for p, amt in result.items())
         await query.message.reply_text(msg, parse_mode="Markdown")
         return ConversationHandler.END
 
+    # --- ITEM SELECTION MODE ---
     context.chat_data["current_selector"] = 0
     await ask_next_person(query, context)
     return ITEM_SELECTION
@@ -171,10 +175,9 @@ async def ask_next_person(update_or_query, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton(f"{name} (${price:.2f})", callback_data=f"select|{idx}|{seq}")]
         for idx, seq, name, price in unit_list
     ]
-    # Only keep the Done button
     buttons.append([InlineKeyboardButton("✅ Done", callback_data="done")])
-
     markup = InlineKeyboardMarkup(buttons)
+
     await msg.reply_text(
         f"Hi {current_person}, please select the items you ordered:",
         reply_markup=markup
@@ -197,14 +200,10 @@ async def handle_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await ask_next_person(query, context)
         return ITEM_SELECTION
 
-    if data == "restart":
-        return await handle_restart(update, context)
-
     if data.startswith("select|"):
         _, item_index_str, unit_seq_str = data.split("|")
         item_index = int(item_index_str)
-        items = parsed.get("items", [])
-        item = items[item_index]
+        item = parsed["items"][item_index]
         item.setdefault("assigned_to", []).append(current_person)
         assignments = context.chat_data.setdefault("assignments", {})
         assignments.setdefault(current_person, []).append(item["name"])
