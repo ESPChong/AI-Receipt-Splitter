@@ -43,7 +43,7 @@ async def ask_names(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["split_mode"] = "even" if "even" in mode else "own"
 
     await update.message.reply_text(
-        "Please list the names or @handles of everyone who was present, separated by commas."
+        "Please list the names of everyone who were present, separated by commas. (Note: Please do not use the same name twice.)"
     )
     return ASK_NAMES
 
