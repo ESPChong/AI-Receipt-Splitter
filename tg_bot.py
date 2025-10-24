@@ -1,13 +1,9 @@
 # tg_bot.py
 import os
-import json
 from dotenv import load_dotenv
-from telegram import (
-    Update, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup
-)
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
-    ApplicationBuilder, ConversationHandler, CommandHandler, MessageHandler,
-    CallbackQueryHandler, filters, ContextTypes
+    ApplicationBuilder, ConversationHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 )
 from ocr import extract_text_from_image
 from ai_parser import parse_receipt_text
@@ -20,8 +16,45 @@ TOKEN = os.getenv("TELEGRAM_TOKEN")
 WAIT_RECEIPT, ASK_SPLIT_MODE, ASK_NAMES, CONFIRM_PEOPLE, ITEM_SELECTION = range(5)
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Please send a clear photo of the receipt to start.")
+# --- Keyboards ---
+def main_menu_keyboard():
+    """Keyboard for welcome/start + restart button."""
+    return ReplyKeyboardMarkup(
+        [[KeyboardButton("🚀 Start Receipt Splitter"), KeyboardButton("🔄 Restart")]],
+        resize_keyboard=True,
+        one_time_keyboard=True
+    )
+
+
+def split_mode_keyboard():
+    """Keyboard for split mode selection + restart button."""
+    return ReplyKeyboardMarkup(
+        [[KeyboardButton("Even Split"), KeyboardButton("Each Pays Their Own"), KeyboardButton("🔄 Restart")]],
+        resize_keyboard=True,
+        one_time_keyboard=True
+    )
+
+
+# --- Handlers ---
+async def handle_receipt_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Merged welcome + ask receipt photo message."""
+    await update.message.reply_text(
+        "👋 Welcome to the Receipt Splitter bot!\n"
+        "📸 Please send a clear photo of the receipt to start.",
+        reply_markup=main_menu_keyboard()
+    )
+    return WAIT_RECEIPT
+
+
+async def handle_restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Reset the conversation and show the welcome message."""
+    context.user_data.clear()
+    context.chat_data.clear()
+    await update.message.reply_text(
+        "👋 Welcome to the Receipt Splitter bot!\n"
+        "📸 Please send a clear photo of the receipt to start.",
+        reply_markup=main_menu_keyboard()
+    )
     return WAIT_RECEIPT
 
 
@@ -33,23 +66,30 @@ async def handle_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["receipt_path"] = img_path
     await update.message.reply_text(
         "Got it! How would you like to split the bill?",
-        reply_markup=ReplyKeyboardMarkup([["Even Split", "Each Pays Their Own"]], one_time_keyboard=True)
+        reply_markup=split_mode_keyboard()
     )
     return ASK_SPLIT_MODE
 
 
 async def ask_names(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    mode = update.message.text.strip().lower()
-    context.user_data["split_mode"] = "even" if "even" in mode else "own"
+    text = update.message.text.strip().lower()
+    if text == "🔄 restart":
+        return await handle_restart(update, context)
 
+    context.user_data["split_mode"] = "even" if "even" in text else "own"
     await update.message.reply_text(
-        "Please list the names of everyone who were present, separated by commas. (Note: Please do not use the same name twice.)"
+        "Please list the names of everyone who were present, separated by *spaces*.\n"
+        "(Example: Alice Bob Charlie)\n⚠️ Note: Don’t use the same name twice.",
+        parse_mode="Markdown"
     )
     return ASK_NAMES
 
 
 async def confirm_people(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    names = [n.strip() for n in update.message.text.split(",") if n.strip()]
+    if update.message.text.strip() == "🔄 Restart":
+        return await handle_restart(update, context)
+
+    names = [n.strip() for n in update.message.text.split() if n.strip()]
     context.user_data["participants"] = names
     count = len(names)
 
@@ -70,17 +110,15 @@ async def confirm_people_response(update: Update, context: ContextTypes.DEFAULT_
     await query.answer()
 
     if query.data == "no":
-        await query.edit_message_text("Okay, please re-enter the names separated by commas.")
+        await query.edit_message_text("Okay, please re-enter the names separated by spaces.")
         return ASK_NAMES
 
-    # If confirmed, proceed to parsing and splitting
     await query.edit_message_text("Perfect! Processing your receipt now...")
 
     img_path = context.user_data["receipt_path"]
     participants = context.user_data["participants"]
     split_mode = context.user_data["split_mode"]
 
-    # OCR and parsing
     ocr_text = extract_text_from_image(img_path)
     parsed = parse_receipt_text(ocr_text, participants)
 
@@ -89,19 +127,16 @@ async def confirm_people_response(update: Update, context: ContextTypes.DEFAULT_
 
     if split_mode == "even":
         result = compute_splits(parsed, participants)
-        msg = "💰 *Even Split:*\n"
-        for p, amt in result.items():
-            msg += f"{p}: ${amt:.2f}\n"
+        msg = "*Even Split:*\n" + "\n".join(f"{p}: ${amt:.2f}" for p, amt in result.items())
         await query.message.reply_text(msg, parse_mode="Markdown")
         return ConversationHandler.END
 
-    # Otherwise, start interactive assignment
     context.chat_data["current_selector"] = 0
     await ask_next_person(query, context)
     return ITEM_SELECTION
 
+
 async def ask_next_person(update_or_query, context: ContextTypes.DEFAULT_TYPE):
-    # Handles both update and query input
     msg = update_or_query.message if hasattr(update_or_query, "message") else update_or_query
     parsed = context.chat_data.get("parsed", {})
     idx = context.chat_data.get("current_selector", 0)
@@ -113,17 +148,13 @@ async def ask_next_person(update_or_query, context: ContextTypes.DEFAULT_TYPE):
 
     current_person = participants[idx]
 
-    # Build list of individual selectable units.
-    # unit_list entries: (global_item_index, unit_seq, display_name, unit_price)
+    # Build unassigned item units
     unit_list = []
     next_unit_seq = 0
     for i, item in enumerate(parsed.get("items", [])):
         qty = int(item.get("qty", 1) or 1)
         total_price = float(item.get("total_price", 0) or 0)
-        # compute per-unit price (safe)
         unit_price = (total_price / qty) if qty > 0 else float(item.get("unit_price") or 0.0)
-
-        # how many units already assigned (length of assigned_to list)
         assigned_count = len(item.get("assigned_to", [])) if "assigned_to" in item else 0
         remaining = max(0, qty - assigned_count)
 
@@ -135,13 +166,12 @@ async def ask_next_person(update_or_query, context: ContextTypes.DEFAULT_TYPE):
         await finalize_split(msg, context)
         return ConversationHandler.END
 
-    # Build buttons (one per remaining unit). callback_data: select|<item_index>|<unit_seq>
-    buttons = []
-    for global_idx, seq, name, price in unit_list:
-        text = f"{name} (${price:.2f})"
-        cb = f"select|{global_idx}|{seq}"
-        buttons.append([InlineKeyboardButton(text=text, callback_data=cb)])
-
+    # Inline buttons for selecting items
+    buttons = [
+        [InlineKeyboardButton(f"{name} (${price:.2f})", callback_data=f"select|{idx}|{seq}")]
+        for idx, seq, name, price in unit_list
+    ]
+    # Only keep the Done button
     buttons.append([InlineKeyboardButton("✅ Done", callback_data="done")])
 
     markup = InlineKeyboardMarkup(buttons)
@@ -151,6 +181,7 @@ async def ask_next_person(update_or_query, context: ContextTypes.DEFAULT_TYPE):
     )
     return ITEM_SELECTION
 
+
 async def handle_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -158,49 +189,29 @@ async def handle_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parsed = context.chat_data.get("parsed", {})
     idx = context.chat_data.get("current_selector", 0)
     participants = context.user_data.get("participants", [])
-    if not participants:
-        await query.message.reply_text("No participants found; please restart (/start).")
-        return ConversationHandler.END
     current_person = participants[idx]
 
     if data == "done":
-        # move to next person
         context.chat_data["current_selector"] = idx + 1
         await query.message.reply_text(f"Thanks, {current_person}!")
-        # ask next person - pass query so it replies in same chat
         await ask_next_person(query, context)
         return ITEM_SELECTION
+
+    if data == "restart":
+        return await handle_restart(update, context)
 
     if data.startswith("select|"):
-        # data format: select|<item_index>|<unit_seq>
-        try:
-            _, item_index_str, unit_seq_str = data.split("|")
-            item_index = int(item_index_str)
-        except Exception:
-            await query.message.reply_text("Selection parsing error. Try again.")
-            return ITEM_SELECTION
-
+        _, item_index_str, unit_seq_str = data.split("|")
+        item_index = int(item_index_str)
         items = parsed.get("items", [])
-        if item_index < 0 or item_index >= len(items):
-            await query.message.reply_text("Invalid item selection.")
-            return ITEM_SELECTION
-
         item = items[item_index]
-        # ensure assigned_to list exists
-        if "assigned_to" not in item or not isinstance(item["assigned_to"], list):
-            item["assigned_to"] = []
-
-        # assign one unit to this person
-        item["assigned_to"].append(current_person)
-        # record for quick lookup
+        item.setdefault("assigned_to", []).append(current_person)
         assignments = context.chat_data.setdefault("assignments", {})
         assignments.setdefault(current_person, []).append(item["name"])
-
         await query.message.reply_text(f"Added {item['name']} to {current_person}'s order.")
-        # After selecting, re-show the same person's menu so they can select more until 'Done'
         await ask_next_person(query, context)
         return ITEM_SELECTION
-    
+
 
 async def finalize_split(update, context: ContextTypes.DEFAULT_TYPE):
     parsed = context.chat_data["parsed"]
@@ -208,12 +219,9 @@ async def finalize_split(update, context: ContextTypes.DEFAULT_TYPE):
 
     subtotal = sum(item["total_price"] for item in parsed["items"])
     tax_amount = sum(t.get("amount", 0) for t in parsed.get("taxes", []))
-    service_amount = 0
-    if parsed.get("service_charge"):
-        service_amount = parsed["service_charge"].get("amount") or 0
-    subtotal = subtotal or 1  # avoid division by zero
+    service_amount = (parsed.get("service_charge", {}) or {}).get("amount") or 0
+    subtotal = subtotal or 1
 
-    # Compute proportional rates
     tax_rate = tax_amount / subtotal
     service_rate = service_amount / subtotal
 
@@ -225,25 +233,25 @@ async def finalize_split(update, context: ContextTypes.DEFAULT_TYPE):
         for person in item["assigned_to"]:
             per_person[person] += cost_share
 
-    # Apply proportional tax and service to each person's subtotal
     for p in per_person:
         per_person[p] *= (1 + tax_rate + service_rate)
 
-
-    msg = "💰 *Final Split:*\n"
-    for p, amt in per_person.items():
-        msg += f"{p}: ${amt:.2f}\n"
-
+    msg = "*Final Split:*\n" + "\n".join(f"{p}: ${amt:.2f}" for p, amt in per_person.items())
     await update.reply_text(msg, parse_mode="Markdown")
 
 
+# --- Main entry ---
 def main():
     application = ApplicationBuilder().token(TOKEN).build()
 
     conv = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
+        entry_points=[
+            MessageHandler(filters.TEXT & filters.Regex("^🚀 Start Receipt Splitter$"), handle_receipt_start),
+            MessageHandler(filters.TEXT & filters.Regex("^🔄 Restart$"), handle_restart),
+        ],
         states={
-            WAIT_RECEIPT: [MessageHandler(filters.PHOTO, handle_receipt)],
+            WAIT_RECEIPT: [MessageHandler(filters.PHOTO, handle_receipt),
+                           MessageHandler(filters.TEXT & filters.Regex("^🔄 Restart$"), handle_restart)],
             ASK_SPLIT_MODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_names)],
             ASK_NAMES: [MessageHandler(filters.TEXT & ~filters.COMMAND, confirm_people)],
             CONFIRM_PEOPLE: [CallbackQueryHandler(confirm_people_response)],
@@ -253,7 +261,7 @@ def main():
     )
 
     application.add_handler(conv)
-    print("Bot started (polling)")
+    print("Bot started (polling)...")
     application.run_polling()
 
 

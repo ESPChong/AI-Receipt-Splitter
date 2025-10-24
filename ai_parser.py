@@ -1,8 +1,5 @@
 # ai_parser.py
-import os
-import requests
-import json
-import re
+import os, requests, json, re
 from dotenv import load_dotenv
 
 load_dotenv()
